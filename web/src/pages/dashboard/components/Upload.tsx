@@ -71,11 +71,11 @@ const Upload: React.FC<Props> = ({ dataFileList: [fileList, setFileList], parent
     try {
       const { data: exists } = await req.get('/files', { params: { parent_id: parent?.id, name: file.name } })
       if (/\.part0*\d*$/.test(file.name))
-        throw { status: 400, body: { error: 'The file name cannot end with ".part", even if followed by digits!' } }
+        throw { message: 'Upload error', description: 'The file name cannot end with ".part", even if followed by digits!' }
       if (/\(\d+\).+/.test(file.name))
-        throw { status: 400, body: { error: 'The file name cannot contain text after parentheses with digits inside!' } }
+        throw { message: 'Upload error', description: 'The file name cannot contain text after parentheses with digits inside!' }
       if (exists.length > 0)
-        throw { status: 400, body: { error: `A file/folder named "${file.name}" already exists!` } }
+        throw { message: 'Upload error', description: `A file/folder named "${file.name}" already exists!` }
 
       while (filesWantToUpload.current?.findIndex(f => f.uid === file.uid) !== 0) {
         await new Promise(res => setTimeout(res, 1000))
@@ -204,39 +204,55 @@ const Upload: React.FC<Props> = ({ dataFileList: [fileList, setFileList], parent
         }
       } else {
         for (let j = 0; j < fileParts; j++) {
-          const fileBlob = file.slice(j * MAX_UPLOAD_SIZE, Math.min(j * MAX_UPLOAD_SIZE + MAX_UPLOAD_SIZE, file.size))
+          const fileBlob = file.slice(
+            j * MAX_UPLOAD_SIZE,
+            Math.min(j * MAX_UPLOAD_SIZE + MAX_UPLOAD_SIZE, file.size)
+          )
           const parts = Math.ceil(fileBlob.size / CHUNK_SIZE)
 
           if (!deleted) {
-            const uploadPart = async (i: number) => {
-              if (responses?.length && cancelUploading.current && file.uid === cancelUploading.current) {
-                await Promise.all(responses.map(async response => {
-                  try {
-                    await req.delete(`/files/${response?.file.id}`)
-                  } catch (error) {
-                    // ignore
-                  }
-                }))
+            const uploadPart = async (i: number): Promise<void> => {
+              if (
+                responses?.length &&
+                cancelUploading.current &&
+                file.uid === cancelUploading.current
+              ) {
+                await Promise.all(
+                  responses.map(async (response) => {
+                    try {
+                      await req.delete(`/files/${response?.file.id}`)
+                    } catch (error) {
+                      // ignore
+                    }
+                  })
+                )
                 cancelUploading.current = null
                 deleted = true
                 window.onbeforeunload = undefined as any
               } else {
-                const blobPart = fileBlob.slice(i * CHUNK_SIZE, Math.min(i * CHUNK_SIZE + CHUNK_SIZE, file.size))
+                const blobPart = fileBlob.slice(
+                  i * CHUNK_SIZE,
+                  Math.min(i * CHUNK_SIZE + CHUNK_SIZE, file.size)
+                )
                 const data = new FormData()
                 data.append('upload', blobPart)
 
                 const beginUpload = async () => {
-                  const { data: response } = await req.post(`/files/upload${i > 0 && responses[j]?.file?.id ? `/${responses[j]?.file.id}` : ''}`, data, {
-                    params: {
-                      ...parent?.id ? { parent_id: parent.id } : {},
-                      relative_path: file.webkitRelativePath || null,
-                      name: `${file.name}${fileParts > 1 ? `.part${String(j + 1).padStart(3, '0')}` : ''}`,
-                      size: fileBlob.size,
-                      mime_type: file.type || mime.lookup(file.name) || 'application/octet-stream',
-                      part: i,
-                      total_part: parts,
-                    },
-                  })
+                  const { data: response } = await req.post(
+                    `/files/upload${i > 0 && responses[j]?.file?.id ? `/${responses[j]?.file.id}` : ''}`,
+                    data,
+                    {
+                      params: {
+                        ...parent?.id ? { parent_id: parent.id } : {},
+                        relative_path: file.webkitRelativePath || null,
+                        name: `${file.name}${fileParts > 1 ? `.part${String(j + 1).padStart(3, '0')}` : ''}`,
+                        size: fileBlob.size,
+                        mime_type: file.type || mime.lookup(file.name) || 'application/octet-stream',
+                        part: i,
+                        total_part: parts,
+                      },
+                    }
+                  )
                   return response
                 }
 
@@ -249,7 +265,7 @@ const Upload: React.FC<Props> = ({ dataFileList: [fileList, setFileList], parent
                     if (trial >= RETRY_COUNT) {
                       throw error
                     }
-                    await new Promise(res => setTimeout(res, ++trial * 3000))
+                    await new Promise((res) => setTimeout(res, ++trial * 500))
                   }
                 }
 
@@ -260,14 +276,20 @@ const Upload: React.FC<Props> = ({ dataFileList: [fileList, setFileList], parent
 
             const group = 2
             await uploadPart(0)
+            const promises: Promise<void>[] = []
             for (let i = 1; i < parts - 1; i += group) {
               if (deleted) break
-              const others = Array.from(Array(i + group).keys()).slice(i, Math.min(parts - 1, i + group))
-              await Promise.all(others.map(async j => await uploadPart(j)))
+              const others = Array.from(Array(i + group).keys()).slice(
+                i,
+                Math.min(parts - 1, i + group)
+              )
+              const promisesGroup = others.map(async (j) => await uploadPart(j))
+              promises.push(...promisesGroup)
             }
             if (!deleted && parts - 1 > 0) {
-              await uploadPart(parts - 1)
+              promises.push(uploadPart(parts - 1))
             }
+            await Promise.allSettled(promises)
           }
         }
       }
@@ -289,7 +311,7 @@ const Upload: React.FC<Props> = ({ dataFileList: [fileList, setFileList], parent
       notification.close(`upload-${file.uid}`)
       notification.error({
         key: 'fileUploadError',
-        message: error?.response?.status || 'Something error',
+        message: error?.response?.status || error?.message || 'Something error',
         ...error?.response?.data ? { description: <>
           <Typography.Paragraph>
             {error?.response?.data?.error || error.message || 'Something error'}
@@ -297,10 +319,11 @@ const Upload: React.FC<Props> = ({ dataFileList: [fileList, setFileList], parent
           <Typography.Paragraph code>
             {JSON.stringify(error?.response?.data || error?.data || error, null, 2)}
           </Typography.Paragraph>
-        </> } : {}
+        </> } : error?.description ? { description: error.description } : {}
       })
       // filesWantToUpload.current = filesWantToUpload.current?.map(f => f.uid === file.uid ? { ...f, status: 'done' } : f)
       filesWantToUpload.current = filesWantToUpload.current?.map(f => f.uid === file.uid ? null : f).filter(Boolean)
+      window.onbeforeunload = undefined as any
       return onError(error.response?.data || error.response || { error: error.message }, file)
     }
   }
@@ -326,7 +349,7 @@ const Upload: React.FC<Props> = ({ dataFileList: [fileList, setFileList], parent
         '0%': '#108ee9',
         '100%': '#87d068',
       },
-      strokeWidth: 3,
+      strokeWidth: 5,
       format: (percent: any) => `${percent}%`
     }
   }
